@@ -25,6 +25,7 @@
 
 package sun.invoke.util;
 
+import java.lang.constant.ClassDesc;
 import java.lang.invoke.MethodType;
 import java.util.ArrayList;
 import java.util.List;
@@ -117,11 +118,17 @@ public class BytecodeDescriptor {
         return unparseMethod(type.returnType(), type.parameterArray());
     }
 
+    public static String unparse(ClassDesc type) {
+        return type.descriptorString();
+    }
+
     public static String unparse(Object type) {
         if (type instanceof Class<?>)
             return unparse((Class<?>) type);
         if (type instanceof MethodType)
             return unparse((MethodType) type);
+        if (type instanceof ClassDesc)
+            return unparse((ClassDesc) type);
         return (String) type;
     }
 
