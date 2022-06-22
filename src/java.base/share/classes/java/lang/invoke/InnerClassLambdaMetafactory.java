@@ -35,14 +35,18 @@ import sun.security.action.GetBooleanAction;
 import java.io.FilePermission;
 import java.io.Serializable;
 import java.lang.constant.ConstantDescs;
+import java.lang.constant.DirectMethodHandleDesc;
+import java.lang.constant.MethodTypeDesc;
 import java.lang.invoke.MethodHandles.Lookup;
 import java.lang.reflect.Modifier;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
 import java.util.LinkedHashSet;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.Optional;
 import java.util.PropertyPermission;
 import java.util.Set;
+import java.util.stream.Stream;
 
 import static java.lang.invoke.MethodHandleStatics.CLASSFILE_VERSION;
 import static java.lang.invoke.MethodHandles.Lookup.ClassOption.NESTMATE;
@@ -293,35 +297,11 @@ import static jdk.internal.org.objectweb.asm.Opcodes.*;
         return generateInnerClass();
     }
 
-    /**
-     * Generate a class file which implements the functional
-     * interface, define and return the class.
-     *
-     * @return a Class which implements the functional interface
-     * @throws LambdaConversionException If properly formed functional interface
-     * is not found
-     */
     @SuppressWarnings("removal")
-    private Class<?> generateInnerClass() throws LambdaConversionException {
-        String[] interfaceNames;
-        String interfaceName = interfaceClass.getName().replace('.', '/');
-        boolean accidentallySerializable = !isSerializable && Serializable.class.isAssignableFrom(interfaceClass);
-        if (altInterfaces.length == 0) {
-            interfaceNames = new String[]{interfaceName};
-        } else {
-            // Assure no duplicate interfaces (ClassFormatError)
-            Set<String> itfs = LinkedHashSet.newLinkedHashSet(altInterfaces.length + 1);
-            itfs.add(interfaceName);
-            for (Class<?> i : altInterfaces) {
-                itfs.add(i.getName().replace('.', '/'));
-                accidentallySerializable |= !isSerializable && Serializable.class.isAssignableFrom(i);
-            }
-            interfaceNames = itfs.toArray(new String[itfs.size()]);
-        }
-
+    private byte[] generateInnerClassBytecode(String[] interfaceNames, boolean accidentallySerializable) throws LambdaConversionException {
         cw.visit(CLASSFILE_VERSION, ACC_SUPER + ACC_FINAL + ACC_SYNTHETIC,
-                 lambdaClassName, null,
-                 JAVA_LANG_OBJECT, interfaceNames);
+                    lambdaClassName, null,
+                    JAVA_LANG_OBJECT, interfaceNames);
 
         // Generate final fields to be filled in by constructor
         for (int i = 0; i < argDescs.length; i++) {
@@ -331,7 +311,7 @@ import static jdk.internal.org.objectweb.asm.Opcodes.*;
                                             null, null);
             fv.visitEnd();
         }
-
+//TODO hack here
         generateConstructor();
 
         if (factoryType.parameterCount() == 0 && disableEagerInitialization) {
@@ -340,7 +320,7 @@ import static jdk.internal.org.objectweb.asm.Opcodes.*;
 
         // Forward the SAM method
         MethodVisitor mv = cw.visitMethod(ACC_PUBLIC, interfaceMethodName,
-                                          interfaceMethodType.toMethodDescriptorString(), null, null);
+                                            interfaceMethodType.toMethodDescriptorString(), null, null);
         new ForwardingMethodGenerator(mv).generate(interfaceMethodType);
 
         // Forward the altMethods
@@ -375,6 +355,56 @@ import static jdk.internal.org.objectweb.asm.Opcodes.*;
             // createDirectories may need it
             new PropertyPermission("user.dir", "read"));
         }
+        return classBytes;
+    }
+
+    /**
+     * Generate a class file which implements the functional
+     * interface, define and return the class.
+     *
+     * @return a Class which implements the functional interface
+     * @throws LambdaConversionException If properly formed functional interface
+     * is not found
+     */
+    @SuppressWarnings("removal")
+    private Class<?> generateInnerClass() throws LambdaConversionException {
+        String[] interfaceNames;
+        // convert interface class names to Strings
+        String interfaceName = interfaceClass.getName().replace('.', '/');
+        boolean accidentallySerializable = !isSerializable && Serializable.class.isAssignableFrom(interfaceClass);
+        if (altInterfaces.length == 0) {
+            interfaceNames = new String[]{interfaceName};
+        } else {
+            // Assure no duplicate interfaces (ClassFormatError)
+            Set<String> itfs = new LinkedHashSet<>(altInterfaces.length + 1);
+            itfs.add(interfaceName);
+            for (Class<?> i : altInterfaces) {
+                itfs.add(i.getName().replace('.', '/'));
+                accidentallySerializable |= !isSerializable && Serializable.class.isAssignableFrom(i);
+            }
+            interfaceNames = itfs.toArray(new String[itfs.size()]);
+        }
+
+        MethodTypeDesc[] altMethodDescs = new MethodTypeDesc[altMethods.length];
+        for (int i = 0; i < altMethods.length; i++) {
+            altMethodDescs[i] = altMethods[i].describeConstable().orElseThrow();
+        }
+
+        byte[] classBytes;
+        classBytes = new InnerClassLambdaGenerator(
+            interfaceMethodName,
+            interfaceMethodType.describeConstable().orElseThrow(),
+            dynamicMethodType.describeConstable().orElseThrow(),
+            targetClass.describeConstable().orElseThrow(),
+            interfaceNames,
+            factoryType.describeConstable().orElseThrow(), 
+            isSerializable,
+            accidentallySerializable,
+            (DirectMethodHandleDesc)implementation.describeConstable().orElseThrow(),
+            implKind, 
+            altMethodDescs
+        ).generateInnerClassBytecode();
+        //classBytes = generateInnerClassBytecode(interfaceNames, accidentallySerializable);
         try {
             // this class is linked at the indy callsite; so define a hidden nestmate
             Lookup lookup;
