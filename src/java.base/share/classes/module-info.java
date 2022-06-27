@@ -357,6 +357,24 @@ module java.base {
         java.prefs;
     exports sun.util.resources to
         jdk.localedata;
+    exports jdk.classfile to
+        jdk.jlink;
+    exports jdk.classfile.attribute to
+        jdk.jlink;
+    exports jdk.classfile.constantpool to
+        jdk.jlink;
+    exports jdk.classfile.impl to
+        jdk.jlink;
+    exports jdk.classfile.impl.verifier to
+        jdk.jlink;
+    exports jdk.classfile.instruction to
+        jdk.jlink;
+    exports jdk.classfile.jdktypes to
+        jdk.jlink;
+    exports jdk.classfile.transforms to
+        jdk.jlink;
+    exports jdk.classfile.util to
+        jdk.jlink;
 
     // the service types defined by the APIs in this module
 
