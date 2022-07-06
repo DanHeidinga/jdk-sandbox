@@ -36,6 +36,7 @@ import java.lang.constant.ConstantDescs;
 import java.lang.constant.DirectMethodHandleDesc;
 import java.lang.constant.DirectMethodHandleDesc.Kind;
 import java.lang.constant.MethodTypeDesc;
+import java.lang.invoke.LambdaConversionException;
 import java.nio.file.Files;
 import java.util.EnumSet;
 import java.util.List;
@@ -114,7 +115,12 @@ public final class GenerateLambdaClassesPlugin extends AbstractPlugin {
     @Override
     public ResourcePool transform(ResourcePool in, ResourcePoolBuilder out) {
         initialize(in);
-        // Copy all but DMH_ENTRY to out
+
+        // Identify any lambda metafactory calls in each ResourcePoolEntry
+        // and pre-generate the appropriate classes for each lambda
+        // Fix up the original class to:
+        //     - change the invokedynamic to appropriate lambda class call
+        //     - NestMates?  Update the NestHost and NestMember
         in.transformAndCopy(entry -> {
                 ResourcePoolEntry res = entry;
                 if (entry.type().equals(ResourcePoolEntry.Type.CLASS_OR_RESOURCE)) {
@@ -123,7 +129,6 @@ public final class GenerateLambdaClassesPlugin extends AbstractPlugin {
                         if (path.endsWith("module-info.class")) {
                             // No lambdas in a module-info class
                         } else {
-
                             ClassModel cm = Classfile.parse(entry.contentBytes());
                             for (MethodModel methodModel : cm.methods()) {
                                 for (MethodElement methodElement : methodModel) {
@@ -133,7 +138,10 @@ public final class GenerateLambdaClassesPlugin extends AbstractPlugin {
                                                 case InvokeDynamicInstruction i -> {
                                                     if (isMetafactory(i)) {
                                                         print(xm, i);
-                                                        generateLambdaInnerClass(out, cm, methodElement, i);
+                                                        generateLambdaInnerClass(entry, out, cm, methodElement, i);
+                                                        // transform the `indy` to 'new generatedClass(....)'
+                                                    } else if (isAltMetafactory(i)) {
+                                                        //TODO
                                                     }
                                                 }
                                                 default -> { }
@@ -148,32 +156,23 @@ public final class GenerateLambdaClassesPlugin extends AbstractPlugin {
                         }
                     }
                 }
-
-                // filter out placeholder entries
-                String path = entry.path();
-                // if (path.equals(DIRECT_METHOD_HOLDER_ENTRY) ||
-                //     path.equals(DELEGATING_METHOD_HOLDER_ENTRY) ||
-                //     path.equals(INVOKERS_HOLDER_ENTRY) ||
-                //     path.equals(BASIC_FORMS_HOLDER_ENTRY)) {
-                //     return null;
-                // } else {
-                    return entry;
-                // }
+                return entry;
             }, out);
 
-        // Generate Holder classes
-        // if (traceFileStream != null) {
-        //     try {
-        //         JLIA.generateHolderClasses(traceFileStream)
-        //             .forEach((cn, bytes) -> {
-        //                 String entryName = "/java.base/" + cn + ".class";
-        //                 ResourcePoolEntry ndata = ResourcePoolEntry.create(entryName, bytes);
-        //                 out.add(ndata);
-        //             });
-        //     } catch (Exception ex) {
-        //         throw new PluginException(ex);
-        //     }
-        // }
+        /* Temp disable
+        CodeTransform indyToThunk = (builder, element) -> {
+            if (element instanceof InvokeDynamicInstruction i
+            && isMetafactory(i)
+            ) {
+                CodeModel genModel = generateLambdaInnerClass(entry, out, builder.original().orElseThrow(), methodElement, i);
+                builder.invokevirtual(genModel.thisClass().asSymbol(), "thunk", i.typeSymbol());
+
+            } else {
+                builder.with(element);
+            }
+        };
+        */
+
         return out.build();
     }
 
@@ -217,12 +216,14 @@ public final class GenerateLambdaClassesPlugin extends AbstractPlugin {
     /**
      * Generate the InnerClass for the lambda meta factory
      *
+     * @param entry ResourcePoolEntry representing the original class
      * @param out ResourcePoolBuilder to ensure class is added to the jlinked image
      * @param cm ClassModel for class defining the lambda (invokedynamic instruction)
      * @param methodElement MethodElement for context around the indy instruction
      * @param indy the instruction itself to pull the symbolic data from
+     * @return a ClassModel representing the generated class
      */
-    void generateLambdaInnerClass(ResourcePoolBuilder out, ClassModel cm, MethodElement methodElement, InvokeDynamicInstruction indy) {
+    ClassModel generateLambdaInnerClass(ResourcePoolEntry entry, ResourcePoolBuilder out, ClassModel cm, MethodElement methodElement, InvokeDynamicInstruction indy) {
         //                                                    lookup, String interfaceMethodName, factoryType, interfaceMethodType, impl, dynamicMethodType
         //STATIC/LambdaMetafactory::metafactory(MethodHandles$Lookup,
         // String --> interfaceMethodName,
@@ -256,10 +257,31 @@ public final class GenerateLambdaClassesPlugin extends AbstractPlugin {
         boolean accidentallySerializable = false; // not sure we can tell at jlink time without a full dictionary of the classes (heirarchy)
         DirectMethodHandleDesc implementation = (DirectMethodHandleDesc) bsmArgs.get(1);
         int implKind = implementation.refKind();
-        MethodTypeDesc[] altmethodDescs = null; // OK for metafactory, fill in for altMetafactory
+        MethodTypeDesc[] altMethodDescs = null; // OK for metafactory, fill in for altMetafactory
 
 
-
+        try {
+            byte[] bytes = JLIA.generateLambdaInnerClasses(
+                interfaceMethodName,
+                interfaceMethodType,
+                dynamicMethodType,
+                targetClassDesc,
+                interfaceNames,
+                factoryTypeDesc,
+                isSerializable,
+                accidentallySerializable,
+                implementation, implKind,
+                altMethodDescs);
+            ClassModel genModel = Classfile.parse(bytes);
+            String entryName = "/" + entry.moduleName() + "/" + genModel.thisClass().asInternalName() + ".class";
+            ResourcePoolEntry ndata = ResourcePoolEntry.create(entryName, bytes);
+            System.out.println("Generated: " + entryName);
+            out.add(ndata);
+            return genModel;
+        } catch(LambdaConversionException e) {
+            //TODO: log and continue
+        }
+        return null; // TODO
         /*
         public InnerClassLambdaGenerator(
             String interfaceMethodName, DONE

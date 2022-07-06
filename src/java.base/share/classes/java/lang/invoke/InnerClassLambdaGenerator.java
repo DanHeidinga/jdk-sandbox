@@ -55,9 +55,9 @@ import static java.lang.invoke.MethodType.methodType;
 import static jdk.internal.org.objectweb.asm.Opcodes.*;
 
 /**
- * The class generator for the Lambda metafactory implementation 
+ * The class generator for the Lambda metafactory implementation
  * which dynamically creates an inner-class-like class per lambda callsite.
- * 
+ *
  * This is separated out to allow jlink to use it as well
  *
  * @see InnerClassLambdaMetafactory
@@ -135,10 +135,10 @@ import static jdk.internal.org.objectweb.asm.Opcodes.*;
     private final String implMethodName;             // Name of implementation method "impl"
     private final String implMethodDesc;             // Type descriptor for implementation methods "(I)Ljava/lang/String;"
     final MethodTypeDesc[] altMethodDescs;            // Signatures of additional methods to bridge
-    
-    
+
+
     private final boolean useImplMethodHandle;       // use MethodHandle invocation instead of symbolic bytecode invocation
-    
+
     String[] interfaceNames;
     boolean isSerializable;
     boolean accidentallySerializable;
@@ -149,7 +149,7 @@ import static jdk.internal.org.objectweb.asm.Opcodes.*;
     ClassDesc targetClassDesc;
     DirectMethodHandleDesc implMHDesc;
     MethodTypeDesc invokeTypeDesc;  // Equivalent to `implInfo.getMethodType()`, not `DirectMethodHandleDesc.invocationType` - leading receiver is different
-    
+
     public InnerClassLambdaGenerator(String interfaceMethodName, MethodTypeDesc interfaceMethodTypeDesc, MethodTypeDesc dynamicMethodTypeDesc, ClassDesc targetClassDesc, String[] interfaceNames, MethodTypeDesc factoryTypeDesc, boolean isSerializable, boolean accidentallySerializable, DirectMethodHandleDesc implMHDesc, int implKind, MethodTypeDesc[] altMethodDescs) {
         this.interfaceMethodName = interfaceMethodName;
         this.interfaceMethodTypeDesc = interfaceMethodTypeDesc;
@@ -181,7 +181,7 @@ import static jdk.internal.org.objectweb.asm.Opcodes.*;
         useImplMethodHandle = false; //TODO - figure out the right answer here
 
         constructorTypeDesc = factoryTypeDesc.changeReturnType(ConstantDescs.CD_void);
-        
+
         int parameterCount = factoryTypeDesc.parameterCount();
         if (parameterCount > 0) {
             argNames = new String[parameterCount];
@@ -201,7 +201,7 @@ import static jdk.internal.org.objectweb.asm.Opcodes.*;
 
     @SuppressWarnings("removal")
     public byte[] generateInnerClassBytecode() throws LambdaConversionException {
-        
+
         cw.visit(CLASSFILE_VERSION, ACC_SUPER + ACC_FINAL + ACC_SYNTHETIC,
                     lambdaClassName, null,
                     JAVA_LANG_OBJECT, interfaceNames);
@@ -216,6 +216,7 @@ import static jdk.internal.org.objectweb.asm.Opcodes.*;
         }
 
         generateConstructor();
+        generateThunk();
 
         if (factoryTypeDesc.parameterCount() == 0 && disableEagerInitialization) {
             generateClassInitializer();
@@ -311,12 +312,39 @@ import static jdk.internal.org.objectweb.asm.Opcodes.*;
     }
 
     /**
+     * Generate a thunk with the same signature as the invokedyanmic
+     */
+    private void generateThunk() {
+        MethodVisitor thunk = cw.visitMethod(ACC_PRIVATE | ACC_STATIC, "thunk",
+                                            factoryTypeDesc.descriptorString(), null, null); // fix ctorType
+        thunk.visitCode();
+        thunk.visitTypeInsn(NEW, lambdaClassName);
+        thunk.visitInsn(DUP);
+        // re-push parameters as args
+        int parameterCount = factoryTypeDesc.parameterCount();
+        for (int i = 0, lvIndex = 0; i < parameterCount; i++) {
+            ClassDesc argType = factoryTypeDesc.parameterType(i);
+            thunk.visitVarInsn(getLoadOpcode(argType), lvIndex);
+            lvIndex += getParameterSize(argType);
+        }
+        // call ctor
+        thunk.visitMethodInsn(INVOKESPECIAL, lambdaClassName, NAME_CTOR,
+            constructorTypeDesc.descriptorString(), false);
+
+        //return instance
+        thunk.visitInsn(ARETURN);
+        // Maxs computed by ClassWriter.COMPUTE_MAXS, these arguments ignored
+        thunk.visitMaxs(-1, -1);
+        thunk.visitEnd();
+    }
+
+    /**
      * Remove the leading 'L' & trailing ';' from a descriptor String
      * for use in contexts that want the '/' form of the name rather than
      * the '.' form.
-     * 
+     *
      * If it's an not an 'L' type or is an array, just return the descriptor.
-     * 
+     *
      * @param cd The ClassDesc to get the descriptor from
      * @return the descriptor without the leading 'L' & trailing ';'
      */
@@ -346,7 +374,7 @@ import static jdk.internal.org.objectweb.asm.Opcodes.*;
         mv.visitLdcInsn(interfaceMethodName);
         mv.visitLdcInsn(interfaceMethodTypeDesc.descriptorString());
         mv.visitLdcInsn(implKind);
-        
+
         mv.visitLdcInsn(strippedDescriptor(implMHDesc.owner()));
         mv.visitLdcInsn(implMHDesc.methodName());
         mv.visitLdcInsn(invokeTypeDesc.descriptorString()); //maybe? was invocationType()
