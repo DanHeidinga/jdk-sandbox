@@ -245,18 +245,18 @@ import static jdk.internal.org.objectweb.asm.Opcodes.*;
 
         final byte[] classBytes = cw.toByteArray();
         // If requested, dump out to a file for debugging purposes
-        if (dumper != null) {
-            AccessController.doPrivileged(new PrivilegedAction<>() {
-                @Override
-                public Void run() {
-                    dumper.dumpClass(lambdaClassName, classBytes);
-                    return null;
-                }
-            }, null,
-            new FilePermission("<<ALL FILES>>", "read, write"),
-            // createDirectories may need it
-            new PropertyPermission("user.dir", "read"));
-        }
+        // if (dumper != null) {
+        //     AccessController.doPrivileged(new PrivilegedAction<>() {
+        //         @Override
+        //         public Void run() {
+        //             dumper.dumpClass(lambdaClassName, classBytes);
+        //             return null;
+        //         }
+        //     }, null,
+        //     new FilePermission("<<ALL FILES>>", "read, write"),
+        //     // createDirectories may need it
+        //     new PropertyPermission("user.dir", "read"));
+        // }
         return classBytes;
     }
 
