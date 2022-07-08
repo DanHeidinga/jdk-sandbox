@@ -38,15 +38,21 @@ import java.lang.constant.DirectMethodHandleDesc.Kind;
 import java.lang.constant.MethodTypeDesc;
 import java.lang.invoke.LambdaConversionException;
 import java.nio.file.Files;
+import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.stream.Stream;
 
 import jdk.classfile.ClassModel;
 import jdk.classfile.*;
 import jdk.classfile.instruction.*;
+import jdk.classfile.attribute.*;
 import jdk.internal.access.JavaLangInvokeAccess;
 import jdk.internal.access.SharedSecrets;
 import jdk.tools.jlink.plugin.PluginException;
@@ -63,7 +69,8 @@ public final class GenerateLambdaClassesPlugin extends AbstractPlugin {
     private String mainArgument;
     private Stream<String> traceFileStream;
 
-    private ClassDesc LAMBDA_METAFACTORY_CLASSDESC = ClassDesc.of("java.lang.invoke.LambdaMetafactory");
+    private ClassDesc LAMBDA_METAFACTORY_CLASSDESC
+        = ClassDesc.of("java.lang.invoke.LambdaMetafactory");
 
     public GenerateLambdaClassesPlugin() {
         super("generate-lambda-classes");
@@ -85,31 +92,6 @@ public final class GenerateLambdaClassesPlugin extends AbstractPlugin {
     }
 
     public void initialize(ResourcePool in) {
-        // Load configuration from the contents in the supplied input file
-        // - if none was supplied we look for the default file
-        if (mainArgument == null || !mainArgument.startsWith("@")) {
-            // try (InputStream traceFile =
-            //         this.getClass().getResourceAsStream(DEFAULT_TRACE_FILE)) {
-            //     if (traceFile != null) {
-            //         traceFileStream = new BufferedReader(new InputStreamReader(traceFile)).lines();
-            //     }
-            // } catch (Exception e) {
-            //     throw new PluginException("Couldn't read " + DEFAULT_TRACE_FILE, e);
-            // }
-        } else {
-            File file = new File(mainArgument.substring(1));
-            if (file.exists()) {
-                traceFileStream = fileLines(file);
-            }
-        }
-    }
-
-    private Stream<String> fileLines(File file) {
-        try {
-            return Files.lines(file.toPath());
-        } catch (IOException io) {
-            throw new PluginException("Couldn't read file");
-        }
     }
 
     @Override
@@ -121,6 +103,8 @@ public final class GenerateLambdaClassesPlugin extends AbstractPlugin {
         // Fix up the original class to:
         //     - change the invokedynamic to appropriate lambda class call
         //     - NestMates?  Update the NestHost and NestMember
+        final HashMap<String, ArrayList<ClassDesc>> nestAdditions = new HashMap<>();
+        ResourcePoolHolder mid = new ResourcePoolHolder();
         in.transformAndCopy(entry -> {
                 ResourcePoolEntry res = entry;
                 if (entry.type().equals(ResourcePoolEntry.Type.CLASS_OR_RESOURCE)) {
@@ -129,51 +113,134 @@ public final class GenerateLambdaClassesPlugin extends AbstractPlugin {
                         if (path.endsWith("module-info.class")) {
                             // No lambdas in a module-info class
                         } else {
-                            ClassModel cm = Classfile.parse(entry.contentBytes());
-                            for (MethodModel methodModel : cm.methods()) {
-                                for (MethodElement methodElement : methodModel) {
-                                    if (methodElement instanceof CodeModel xm) {
-                                        for (CodeElement e : xm) {
-                                            switch(e) {
-                                                case InvokeDynamicInstruction i -> {
-                                                    if (isMetafactory(i)) {
-                                                        print(xm, i);
-                                                        generateLambdaInnerClass(entry, out, cm, methodElement, i);
-                                                        // transform the `indy` to 'new generatedClass(....)'
-                                                    } else if (isAltMetafactory(i)) {
-                                                        //TODO
-                                                    }
+                            final ArrayList<ClassDesc> lambdaNestAdditions = new ArrayList<>();
+                            final ClassModel cm = Classfile.parse(entry.contentBytes());
+                            // Pregenerate the Lambda expression implementation classes and convert
+                            // the invokedynamic calls to an invokestatic call on the generated class.
+                            // This converts from runtime generation to pregeneration but currently
+                            // loses the caching of a single instance provided by
+                            // InnerClassLmabdaMetaFactory::buildCallsite.
+                            byte[] delambdaBytes = cm.transform((clb, cle) -> {
+                                if (cle instanceof MethodModel mm) {
+                                    clb.transformMethod(mm, (mb, me) -> {
+                                        if (me instanceof CodeModel xm) {
+                                            mb.transformCode(xm, (builder, element) -> {
+                                                if (element instanceof InvokeDynamicInstruction i
+                                                && isMetafactory(i)
+                                                ) {
+                                                    ClassModel genModel = generateLambdaInnerClass(entry, out, cm, me, i);
+                                                    builder.invokestatic(genModel.thisClass().asSymbol(), "thunk", i.typeSymbol());
+                                                    lambdaNestAdditions.add(genModel.thisClass().asSymbol());
+                                                } else {
+                                                    builder.with(element);
                                                 }
-                                                default -> { }
-                                            }
+                                            });
+                                        } else {
+                                            mb.with(me);
                                         }
-                                    }
+                                    });
+                                } else {
+                                    clb.with(cle);
+                                }
+                            });
+
+
+                            byte[] content = delambdaBytes;
+
+                            // Add the generated lambda classes as NestMembers to the appropriate NestHost.
+                            // If the Host is the same as the ResourcePoolEntry we're processing, we can
+                            // update it immediate. Otherwise, we need to save the data away to update in a
+                            // later pass.
+                            if (!lambdaNestAdditions.isEmpty()) {
+                                Optional<NestHostAttribute> nestHost = cm.findAttribute(Attributes.NEST_HOST);
+                                if (!nestHost.isPresent()) {
+                                    // If there isn't a NestHost attribute, that means the current class can
+                                    // be the NestHost and we can add (or update) its NestMembers attribute.
+                                    Optional<NestMembersAttribute> nestMembers = cm.findAttribute(Attributes.NEST_MEMBERS);
+                                    nestMembers.ifPresent(ms -> ms.nestMembers().forEach(m -> lambdaNestAdditions.add(m.asSymbol())));
+                                    content = Classfile.parse(content).transform(replaceNestMembers(lambdaNestAdditions));
+                                    //Classfile.parse(content).verify(s -> System.out.println("VERIFICATION:" + s));
+                                } else {
+                                    // Need to update the Class.nestHost to include the new members
+                                    System.out.println("Class: " + cm.thisClass().asSymbol() + " Host: " +nestHost.get().nestHost().asInternalName() + " Members: " + lambdaNestAdditions.toString());
+                                    nestAdditions.computeIfAbsent(
+                                        nestHost.get().nestHost().asInternalName(),
+                                        k -> new ArrayList<ClassDesc>()
+                                    ).addAll(lambdaNestAdditions);
                                 }
                             }
 
-                            byte[] content = entry.contentBytes(); // In the future, this will come from the ClassModel
                             res = entry.copyWithContent(content);
                         }
                     }
                 }
-                return entry;
-            }, out);
+                return res;
+            }, mid);
 
-        /* Temp disable
-        CodeTransform indyToThunk = (builder, element) -> {
-            if (element instanceof InvokeDynamicInstruction i
-            && isMetafactory(i)
-            ) {
-                CodeModel genModel = generateLambdaInnerClass(entry, out, builder.original().orElseThrow(), methodElement, i);
-                builder.invokevirtual(genModel.thisClass().asSymbol(), "thunk", i.typeSymbol());
-
-            } else {
-                builder.with(element);
-            }
-        };
-        */
+        if (nestAdditions.isEmpty()) {
+            // Copy from the holding pool to Out
+            mid.drain(e -> out.add(e));
+        } else {
+            mid.drain(e -> {
+                ResourcePoolEntry entry = e;
+                if (entry.type().equals(ResourcePoolEntry.Type.CLASS_OR_RESOURCE)) {
+                    String path = entry.path();
+                    if (path.endsWith(".class")) {
+                        if (path.endsWith("module-info.class")) {
+                            // No lambdas in a module-info class
+                        } else {
+                            final ClassModel cm = Classfile.parse(entry.contentBytes());
+                            ArrayList<ClassDesc> newNestMembers = nestAdditions.remove(cm.thisClass().asInternalName());
+                            if (newNestMembers != null && !newNestMembers.isEmpty()) {
+                                if (cm.findAttribute(Attributes.NEST_HOST).isPresent()) {
+                                    throw throwConflictingNestAttributesState(cm, newNestMembers);
+                                }
+                                Optional<NestMembersAttribute> nestMembers = cm.findAttribute(Attributes.NEST_MEMBERS);
+                                nestMembers.ifPresent(ms -> ms.nestMembers().forEach(m -> newNestMembers.add(m.asSymbol())));
+                                byte[] updated = cm.transform(replaceNestMembers(newNestMembers));
+                                entry = entry.copyWithContent(updated);
+                            }
+                        }
+                    }
+                }
+                out.add(entry);
+            });
+        }
 
         return out.build();
+    }
+
+    IllegalStateException throwConflictingNestAttributesState(ClassModel cm, ArrayList<ClassDesc> newMembers) {
+        Optional<NestHostAttribute> nestHost = cm.findAttribute(Attributes.NEST_HOST);
+        Optional<NestMembersAttribute> nestMembers = cm.findAttribute(Attributes.NEST_MEMBERS);
+
+        StringBuffer sb = new StringBuffer();
+        sb.append("-- Host --\n");
+        nestHost.ifPresent( n -> sb.append(n.nestHost().asInternalName()));
+        sb.append("\n-- Existing Members --\n");
+        nestMembers.ifPresent( n -> sb.append(n.nestMembers()));
+        sb.append("\n-- New Members " + newMembers.size() + "--\n");
+        sb.append(newMembers);
+        sb.append("\n-- End --\n");
+        throw new IllegalStateException("Nest Attribute Conflict: " + cm.thisClass().asInternalName() +"\n" + sb.toString());
+    }
+
+    /**
+     * A ClassTransform that drops the existing NestMembersAttribute
+     * and replaces it with a new one containging the passed in nestMembers
+     *
+     * @param nestMembers List of ClassDesc describing the full set of NestMembers
+     * @return The ClassTransform operation.
+     */
+    ClassTransform replaceNestMembers(ArrayList<ClassDesc> nestMembers) {
+        return ClassTransform
+            .dropping(nma -> nma instanceof NestMembersAttribute)
+            .andThen(
+                ClassTransform.endHandler(b -> {
+                    b.with(NestMembersAttribute.ofSymbols(nestMembers));
+                }
+            )
+        );
     }
 
     static void print(CodeModel codeModel, InvokeDynamicInstruction indy) {
@@ -188,7 +255,6 @@ public final class GenerateLambdaClassesPlugin extends AbstractPlugin {
     }
 
     boolean isMetafactory(InvokeDynamicInstruction indy) {
-        //                                                          interfaceMethodName, factoryType, interfaceMethodType, impl, dynamicMethodType
         //STATIC/LambdaMetafactory::metafactory(MethodHandles$Lookup,String,MethodType,MethodType,MethodHandle,MethodType)CallSite]
         DirectMethodHandleDesc bsm = indy.bootstrapMethod();
         if (bsm.methodName().equals("metafactory")
@@ -210,6 +276,14 @@ public final class GenerateLambdaClassesPlugin extends AbstractPlugin {
             return true;
         }
         return false;
+    }
+
+    static String nestHostInternalName(ClassModel cm) {
+        Optional<NestHostAttribute> nestHost = cm.findAttribute(Attributes.NEST_HOST);
+        if (nestHost.isPresent()) {
+            return nestHost.get().nestHost().asInternalName();
+        }
+        return cm.thisClass().asInternalName();
     }
 
 
@@ -252,7 +326,7 @@ public final class GenerateLambdaClassesPlugin extends AbstractPlugin {
         ClassDesc targetClassDesc = cm.thisClass().asSymbol(); //Class calling the metafactory
         MethodTypeDesc factoryTypeDesc = indy.typeSymbol();
         ClassDesc interfaceDesc = factoryTypeDesc.returnType();
-        String[] interfaceNames = new String[] { interfaceDesc.descriptorString() }; // from the altMetafactory Classes[] altInterfaces array.  Must include interface name
+        String[] interfaceNames = new String[] { strippedDescriptor(interfaceDesc) }; // from the altMetafactory Classes[] altInterfaces array.  Must include interface name
         boolean isSerializable = false; // only set by altMetafactory
         boolean accidentallySerializable = false; // not sure we can tell at jlink time without a full dictionary of the classes (heirarchy)
         DirectMethodHandleDesc implementation = (DirectMethodHandleDesc) bsmArgs.get(1);
@@ -273,6 +347,11 @@ public final class GenerateLambdaClassesPlugin extends AbstractPlugin {
                 implementation, implKind,
                 altMethodDescs);
             ClassModel genModel = Classfile.parse(bytes);
+
+            // set the nest host - probably better done when creating the classfile originally....
+            NestHostAttribute genHost = determineNestHost(cm);
+            bytes = genModel.transform(ClassTransform.endHandler(b -> b.with(genHost)));
+
             String entryName = "/" + entry.moduleName() + "/" + genModel.thisClass().asInternalName() + ".class";
             ResourcePoolEntry ndata = ResourcePoolEntry.create(entryName, bytes);
             System.out.println("Generated: " + entryName);
@@ -282,20 +361,85 @@ public final class GenerateLambdaClassesPlugin extends AbstractPlugin {
             //TODO: log and continue
         }
         return null; // TODO
-        /*
-        public InnerClassLambdaGenerator(
-            String interfaceMethodName, DONE
-            MethodTypeDesc interfaceMethodTypeDesc, DONE
-            MethodTypeDesc dynamicMethodTypeDesc, DONE
-            ClassDesc targetClassDesc,
-            String[] interfaceNames,
-            MethodTypeDesc factoryTypeDesc,
-            boolean isSerializable,
-            boolean accidentallySerializable,
-            DirectMethodHandleDesc implMHDesc,
-            int implKind,
-            MethodTypeDesc[] altMethodDescs);
-        */
+    }
+
+        /**
+     * Remove the leading 'L' & trailing ';' from a descriptor String
+     * for use in contexts that want the '/' form of the name rather than
+     * the '.' form.
+     *
+     * If it's an not an 'L' type or is an array, just return the descriptor.
+     *
+     * @param cd The ClassDesc to get the descriptor from
+     * @return the descriptor without the leading 'L' & trailing ';'
+     */
+    private static String strippedDescriptor(ClassDesc cd) {
+        String desc = cd.descriptorString();
+        if (desc.charAt(0) == 'L') {
+            desc = desc.substring(1, desc.length() - 1);
+        }
+        return desc;
+    }
+
+    /**
+     * Determine the NestHost for a given ClassModel.
+     *
+     * There are three cases:
+     * 1) The class has a NestHost attribute
+     * 2) The class has a NestMembers attribute and is therefore its own NestHost
+     * 3) The class has no recorded Nest relationships and is therefore its own NestHost
+     * @param cm The ClassModel to find the NestHost for
+     * @return a NestHostAttribute for the given ClassModel
+     */
+    NestHostAttribute determineNestHost(ClassModel cm) {
+        Optional<NestHostAttribute> nestHost = cm.findAttribute(Attributes.NEST_HOST);
+        // NestHost already set for current class - use it
+        if (nestHost.isPresent()) {
+            return nestHost.get();
+        }
+        // We can collapse case 2 & 3 into a single implementation as they both
+        // result in setting the NestHost to the current ClassModel.
+        //return NestHostAttribute.of(cm.thisClass());
+        NestHostAttribute nha = NestHostAttribute.of(cm.thisClass()); // TODO: determine if this is the source of Lfoo; rather than Foo bug
+        System.out.println("Internal Name generated from NHA: "+nha.nestHost().asInternalName());
+        return nha;
+    }
+
+    /*
+     * Temporary holding pool for Resources that may need a second transformation
+     * by the current Plugin.
+     */
+    static class ResourcePoolHolder implements ResourcePoolBuilder {
+        private HashSet<ResourcePoolEntry> entries = new HashSet<>();
+        private boolean drained;
+
+        public ResourcePoolHolder() {
+            super();
+        }
+
+        @Override
+        public void add(ResourcePoolEntry data) {
+            validateIfAlreadyDrained();
+            entries.add(data);
+        }
+
+        @Override
+        public ResourcePool build() {
+            throw new UnsupportedOperationException("Can't build this pool.  Must be manaully drained");
+        }
+
+        public void drain(Consumer<? super ResourcePoolEntry> action) {
+            validateIfAlreadyDrained();
+            drained = true;
+            entries.forEach(action);
+        }
+
+        private void validateIfAlreadyDrained() {
+            if (drained == true) {
+                throw new IllegalStateException("Already drained()");
+            }
+        }
     }
 
 }
+
