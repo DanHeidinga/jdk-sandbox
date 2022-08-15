@@ -156,10 +156,9 @@ public final class GenerateLambdaClassesPlugin extends AbstractPlugin {
                                 if (!nestHost.isPresent()) {
                                     // If there isn't a NestHost attribute, that means the current class can
                                     // be the NestHost and we can add (or update) its NestMembers attribute.
-                                    Optional<NestMembersAttribute> nestMembers = cm.findAttribute(Attributes.NEST_MEMBERS);
-                                    nestMembers.ifPresent(ms -> ms.nestMembers().forEach(m -> lambdaNestAdditions.add(m.asSymbol())));
-                                    content = Classfile.parse(content).transform(replaceNestMembers(lambdaNestAdditions));
-                                    //Classfile.parse(content).verify(s -> System.out.println("VERIFICATION:" + s));
+                                    content = Classfile.parse(content).transform(
+                                        replaceNestMemberGetOriginal(lambdaNestAdditions)
+                                    );
                                 } else {
                                     // Need to update the Class.nestHost to include the new members
                                     System.out.println("Class: " + cm.thisClass().asSymbol() + " Host: " +nestHost.get().nestHost().asInternalName() + " Members: " + lambdaNestAdditions.toString());
@@ -195,9 +194,10 @@ public final class GenerateLambdaClassesPlugin extends AbstractPlugin {
                                 if (cm.findAttribute(Attributes.NEST_HOST).isPresent()) {
                                     throw throwConflictingNestAttributesState(cm, newNestMembers);
                                 }
-                                Optional<NestMembersAttribute> nestMembers = cm.findAttribute(Attributes.NEST_MEMBERS);
-                                nestMembers.ifPresent(ms -> ms.nestMembers().forEach(m -> newNestMembers.add(m.asSymbol())));
-                                byte[] updated = cm.transform(replaceNestMembers(newNestMembers));
+                                byte[] updated = cm.transform(replaceNestMemberGetOriginal(newNestMembers));
+                                // Optional<NestMembersAttribute> nestMembers = cm.findAttribute(Attributes.NEST_MEMBERS);
+                                // nestMembers.ifPresent(ms -> ms.nestMembers().forEach(m -> newNestMembers.add(m.asSymbol())));
+                                // byte[] updated = cm.transform(replaceNestMembers(newNestMembers));
                                 entry = entry.copyWithContent(updated);
                             }
                         }
@@ -238,6 +238,56 @@ public final class GenerateLambdaClassesPlugin extends AbstractPlugin {
             .andThen(
                 ClassTransform.endHandler(b -> {
                     b.with(NestMembersAttribute.ofSymbols(nestMembers));
+                }
+            )
+        );
+    }
+
+    ClassTransform replaceNestMembers(NestMembersAttribute nestMembers) {
+        return ClassTransform
+            .dropping(nma -> nma instanceof NestMembersAttribute)
+            .andThen(
+                ClassTransform.endHandler(b -> {
+                    b.with(nestMembers);
+                }
+            )
+        );
+    }
+
+    ClassTransform replaceNestMemberStatefull(ArrayList<ClassDesc> nestMembers) {
+        return ClassTransform
+            .ofStateful(
+                () -> new ClassTransform() {
+                    NestMembersAttribute foundNMA;
+
+                    public void accept(ClassBuilder b, ClassElement e) {
+                        switch (e) {
+                            case NestMembersAttribute a -> foundNMA = a;
+                            default -> b.with(e);
+                        }
+                    }
+
+                    public void atEnd(ClassBuilder b) {
+                        if (foundNMA != null) {
+                            b.with(NestMembersAttribute.withSymbols(foundNMA, nestMembers));
+                        } else {
+                            b.with(NestMembersAttribute.ofSymbols(nestMembers));
+                        }
+                    }
+                }
+            );
+    }
+
+    ClassTransform replaceNestMemberGetOriginal(ArrayList<ClassDesc> nestMembers) {
+        return ClassTransform
+            .dropping(nma -> nma instanceof NestMembersAttribute)
+            .andThen(
+                ClassTransform.endHandler(b -> {
+                    NestMembersAttribute newAttribute =
+                        b.original().get().findAttribute(Attributes.NEST_MEMBERS)
+                            .map(nma -> NestMembersAttribute.withSymbols(nma, nestMembers))
+                            .orElse(NestMembersAttribute.ofSymbols(nestMembers));
+                    b.with(newAttribute);
                 }
             )
         );
