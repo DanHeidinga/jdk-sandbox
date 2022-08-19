@@ -47,6 +47,9 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
 import java.util.stream.Stream;
 
 import jdk.classfile.ClassModel;
@@ -157,7 +160,9 @@ public final class GenerateLambdaClassesPlugin extends AbstractPlugin {
                                     // If there isn't a NestHost attribute, that means the current class can
                                     // be the NestHost and we can add (or update) its NestMembers attribute.
                                     content = Classfile.parse(content).transform(
-                                        replaceNestMemberGetOriginal(lambdaNestAdditions)
+                                        //replaceNestMemberGetOriginal(lambdaNestAdditions)
+                                       // replaceHold(lambdaNestAdditions)
+                                       singleAttribT(lambdaNestAdditions)
                                     );
                                 } else {
                                     // Need to update the Class.nestHost to include the new members
@@ -194,7 +199,11 @@ public final class GenerateLambdaClassesPlugin extends AbstractPlugin {
                                 if (cm.findAttribute(Attributes.NEST_HOST).isPresent()) {
                                     throw throwConflictingNestAttributesState(cm, newNestMembers);
                                 }
-                                byte[] updated = cm.transform(replaceNestMemberGetOriginal(newNestMembers));
+                                byte[] updated = cm.transform(
+                                    //replaceNestMemberGetOriginal(newNestMembers)
+                                    //replaceHold(newNestMembers)
+                                    singleAttribT(newNestMembers)
+                                );
                                 // Optional<NestMembersAttribute> nestMembers = cm.findAttribute(Attributes.NEST_MEMBERS);
                                 // nestMembers.ifPresent(ms -> ms.nestMembers().forEach(m -> newNestMembers.add(m.asSymbol())));
                                 // byte[] updated = cm.transform(replaceNestMembers(newNestMembers));
@@ -291,6 +300,87 @@ public final class GenerateLambdaClassesPlugin extends AbstractPlugin {
                 }
             )
         );
+    }
+
+    ClassTransform replaceHold(ArrayList<ClassDesc> nestMembers) {
+        HoldingTransform ht = new HoldingTransform(e -> e instanceof NestMembersAttribute);
+        return ClassTransform
+            .ofStateful(
+                () -> {
+                 return ht
+                  .andThen(ClassTransform.dropping(nma -> nma instanceof NestMembersAttribute))
+                  .andThen(
+                     ClassTransform.endHandler(b -> {
+                       NestMembersAttribute newAttribute =
+                         ht.get()
+                            .map(nma -> NestMembersAttribute.withSymbols((NestMembersAttribute)nma, nestMembers))
+                            .orElse(NestMembersAttribute.ofSymbols(nestMembers));
+                         b.with(newAttribute);
+                       }
+                     )
+                  );
+                }
+            );
+    }
+
+    ClassTransform singleAttribT(final ArrayList<ClassDesc> nestMembers) {
+        return ClassTransform.ofStateful( () -> {
+            return new SingleAttributeTransform<NestMembersAttribute>(
+                NestMembersAttribute.class,
+                nma -> { return NestMembersAttribute.withSymbols((NestMembersAttribute)nma, nestMembers);},
+                () -> { return NestMembersAttribute.ofSymbols(nestMembers);});
+            }
+        );
+    }
+
+    class HoldingTransform implements ClassTransform {
+        ClassElement held;
+        Predicate<ClassElement> filter;
+
+        public HoldingTransform(Predicate<ClassElement> filter) {
+            this.filter = filter;
+        }
+
+        public void accept(ClassBuilder b, ClassElement e) {
+            if (filter.test(e)) { held = e; }
+            b.with(e);
+        }
+
+        public Optional<ClassElement> get() {
+            return Optional.ofNullable(held);
+        }
+    }
+
+    final class SingleAttributeTransform<T extends Attribute<T>> implements ClassTransform {
+        Class<T> type;
+        ClassElement attrib;
+        Function<ClassElement, ClassElement> ifPresent;
+        Supplier<ClassElement> ifAbsent;
+
+        public SingleAttributeTransform(Class<T> type, Function<ClassElement,ClassElement> ifPresent, Supplier<ClassElement> ifAbsent) {
+            this.type = type;
+            try {
+                type.asSubclass(ClassElement.class);
+            } catch(ClassCastException e) {
+                throw new IllegalArgumentException("The expected Attribute (" + type + ") must be a ClassElement", e);
+            }
+            this.ifPresent = ifPresent;
+            this.ifAbsent = ifAbsent;
+        }
+
+        public void accept(ClassBuilder b, ClassElement e) {
+            if (type.isInstance(e)) { attrib = e; }
+            else { b.with(e); }
+        }
+
+        public void atEnd(ClassBuilder b) {
+            if (attrib != null) {
+                b.with(ifPresent.apply(attrib));
+            } else {
+                b.with(ifAbsent.get());
+            }
+        }
+
     }
 
     static void print(CodeModel codeModel, InvokeDynamicInstruction indy) {
