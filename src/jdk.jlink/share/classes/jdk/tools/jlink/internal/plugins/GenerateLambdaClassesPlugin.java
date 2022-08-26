@@ -56,6 +56,7 @@ import jdk.classfile.ClassModel;
 import jdk.classfile.*;
 import jdk.classfile.instruction.*;
 import jdk.classfile.attribute.*;
+import jdk.classfile.constantpool.ClassEntry;
 import jdk.internal.access.JavaLangInvokeAccess;
 import jdk.internal.access.SharedSecrets;
 import jdk.tools.jlink.plugin.PluginException;
@@ -278,7 +279,7 @@ public final class GenerateLambdaClassesPlugin extends AbstractPlugin {
 
                     public void atEnd(ClassBuilder b) {
                         if (foundNMA != null) {
-                            b.with(NestMembersAttribute.withSymbols(foundNMA, nestMembers));
+                            b.with(NestMembersAttribute.of(ClassEntry.addingSymbols(foundNMA.nestMembers(), nestMembers)));
                         } else {
                             b.with(NestMembersAttribute.ofSymbols(nestMembers));
                         }
@@ -294,7 +295,7 @@ public final class GenerateLambdaClassesPlugin extends AbstractPlugin {
                 ClassTransform.endHandler(b -> {
                     NestMembersAttribute newAttribute =
                         b.original().get().findAttribute(Attributes.NEST_MEMBERS)
-                            .map(nma -> NestMembersAttribute.withSymbols(nma, nestMembers))
+                            .map(nma -> NestMembersAttribute.of(ClassEntry.addingSymbols(nma.nestMembers(), nestMembers)))
                             .orElse(NestMembersAttribute.ofSymbols(nestMembers));
                     b.with(newAttribute);
                 }
@@ -313,7 +314,7 @@ public final class GenerateLambdaClassesPlugin extends AbstractPlugin {
                      ClassTransform.endHandler(b -> {
                        NestMembersAttribute newAttribute =
                          ht.get()
-                            .map(nma -> NestMembersAttribute.withSymbols((NestMembersAttribute)nma, nestMembers))
+                            .map(nma -> NestMembersAttribute.of(ClassEntry.addingSymbols(((NestMembersAttribute)nma).nestMembers(), nestMembers)))
                             .orElse(NestMembersAttribute.ofSymbols(nestMembers));
                          b.with(newAttribute);
                        }
@@ -327,7 +328,7 @@ public final class GenerateLambdaClassesPlugin extends AbstractPlugin {
         return ClassTransform.ofStateful( () -> {
             return new SingleAttributeTransform<NestMembersAttribute>(
                 NestMembersAttribute.class,
-                nma -> { return NestMembersAttribute.withSymbols((NestMembersAttribute)nma, nestMembers);},
+                nma -> { return NestMembersAttribute.of(ClassEntry.addingSymbols(((NestMembersAttribute)nma).nestMembers(), nestMembers));},
                 () -> { return NestMembersAttribute.ofSymbols(nestMembers);});
             }
         );
