@@ -1,0 +1,6 @@
+JAVAC_FLAGS += -XDstringConcat=inline -XDignorePreview \
+        --add-exports java.base/jdk.classfile=ALL-UNNAMED \
+        --add-exports java.base/jdk.classfile.attribute=ALL-UNNAMED \
+        --add-exports java.base/jdk.classfile.constantpool=ALL-UNNAMED \
+        --add-exports java.base/jdk.classfile.jdktypes=ALL-UNNAMED \
+        --add-exports java.base/jdk.classfile.transforms=ALL-UNNAMED

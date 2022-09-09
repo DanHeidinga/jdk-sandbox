@@ -25,6 +25,7 @@
 package jdk.classfile.attribute;
 
 import java.lang.constant.ClassDesc;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
@@ -80,5 +81,45 @@ public sealed interface NestMembersAttribute extends Attribute<NestMembersAttrib
     static NestMembersAttribute ofSymbols(ClassDesc... nestMembers) {
         // List view, since ref to nestMembers is temporary
         return ofSymbols(Arrays.asList(nestMembers));
+    }
+
+    /**
+     * {@return a {@code NestMembers} attribute}
+     * @param base the provider of the base set of nest member classes
+     * @param additions the additions to nest members
+     */
+    static NestMembersAttribute with(NestMembersAttribute base, List<ClassEntry> additions) {
+        ArrayList<ClassEntry> members = new ArrayList<>(base.nestMembers());
+        members.addAll(additions);
+        return new UnboundAttribute.UnboundNestMembersAttribute(members);
+    }
+
+    /**
+     * {@return a {@code NestMembers} attribute}
+     * @param base the provider of the base set of nest member classes
+     * @param additions the additions to nest members
+     */
+    static NestMembersAttribute with(NestMembersAttribute base, ClassEntry... additions) {
+        return with(base, List.of(additions));
+    }
+
+    /**
+     * {@return a {@code NestMembers} attribute}
+     * @param base the provider of the base set of nest member classes
+     * @param additions the additions to nest members
+     *
+     */
+    static NestMembersAttribute withSymbols(NestMembersAttribute base, List<ClassDesc> additions) {
+        return with(base, Util.entryList(additions));
+    }
+
+    /**
+     * {@return a {@code NestMembers} attribute}
+     * @param base the provider of the base set of nest member classes
+     * @param additions the additions to nest members
+     *
+     */
+    static NestMembersAttribute withSymbols(NestMembersAttribute base, ClassDesc... additions) {
+        return withSymbols(base, Arrays.asList(additions));
     }
 }

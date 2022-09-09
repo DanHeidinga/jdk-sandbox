@@ -30,7 +30,9 @@ import java.lang.module.ModuleDescriptor;
 import java.lang.module.ModuleFinder;
 import java.lang.module.ModuleReader;
 import java.lang.module.ModuleReference;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -88,10 +90,21 @@ final class ResourcePoolConfiguration {
         pool.moduleView().modules().forEach(m -> {
             ModuleDescriptor desc = m.descriptor();
             if (!desc.packages().equals(m.packages())) {
+                ArrayList<String> badPackages = new ArrayList<>();
+                Set<String> toIterate = desc.packages();
+                Set<String> toCheck = m.packages();
+                if (m.packages().size() > desc.packages().size()) {
+                    toIterate = m.packages();
+                    toCheck = desc.packages();
+                }
+                for (String s : toIterate) {
+                    if (!toCheck.contains(s)) { badPackages.add(s); }
+                }
                 throw new RuntimeException("Module " + m.name() +
-                   "'s descriptor indicates the set of packages is : " +
-                   desc.packages() + ", but module contains packages: " +
-                   m.packages());
+                   " has too packages - extra: " + badPackages);
+                   //"'s descriptor indicates the set of packages is : " +
+                   //desc.packages() + ", but module contains packages: " +
+                   //m.packages());
             }
         });
     }

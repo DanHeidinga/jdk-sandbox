@@ -26,6 +26,7 @@ package jdk.classfile.impl;
 
 import java.lang.constant.ClassDesc;
 import java.util.AbstractList;
+import java.util.Arrays;
 import java.util.BitSet;
 import java.util.Collection;
 import java.util.Iterator;
